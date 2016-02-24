@@ -14,6 +14,7 @@
  *
  *  Author: superuser-ule (fix)
  *  Date: 2016-02-06
+ *  Last Update : 2016-02-24
  */
 definition(
     name: "Wemo (Connect) Advanced",
@@ -43,18 +44,33 @@ preferences {
 }
 private discoverAllWemoTypes()
 {
-	
     log.trace "discoverAllWemoTypes"
+	if(!state.subscribe) {
+        subscribe(location, null, locationHandlerWemo, [filterEvents:false])
+        state.subscribe = true
+    }
     sendHubCommand(new physicalgraph.device.HubAction("lan discovery urn:Belkin:device:insight:1/urn:Belkin:device:controllee:1/urn:Belkin:device:sensor:1/urn:Belkin:device:lightswitch:1", physicalgraph.device.Protocol.LAN))
-    
-    //discover()
-    
 }
 
 private getFriendlyName(String deviceNetworkId) {
-	sendHubCommand(new physicalgraph.device.HubAction("""GET /setup.xml HTTP/1.1\r\nHOST: ${deviceNetworkId} \r\n\r\n""", physicalgraph.device.Protocol.LAN, "${deviceNetworkId}"))
+	def hostAddress = getHostAddress(deviceNetworkId)
+	log.trace "GET /setup.xml HTTP/1.1\r\nHOST: ${hostAddress} ${deviceNetworkId}"
+	sendHubCommand(new physicalgraph.device.HubAction("""GET /setup.xml HTTP/1.1\r\nHOST: ${hostAddress}\r\n\r\n""", physicalgraph.device.Protocol.LAN, "${deviceNetworkId}"))
 }
 
+private getHostAddress(d) {
+	def parts = d.split(":")
+	def ip = convertHexToIP(parts[0])
+	def port = convertHexToInt(parts[1])
+	return ip + ":" + port
+}
+private Integer convertHexToInt(hex) {
+	Integer.parseInt(hex,16)
+}
+
+private String convertHexToIP(hex) {
+	[convertHexToInt(hex[0..1]),convertHexToInt(hex[2..3]),convertHexToInt(hex[4..5]),convertHexToInt(hex[6..7])].join(".")
+}
 private verifyDevices() {
 	def devices = getWemoSwitches().findAll { it?.value?.verified != true }
 	devices.each {
@@ -72,10 +88,8 @@ def wemoDiscovery()
 		state.refreshCount = refreshCount + 1
 		def refreshInterval = 5
 
-		log.debug "REFRESH COUNT :: ${refreshCount}"
-
 		if(!state.subscribe) {
-			subscribe(location, null, locationHandler, [filterEvents:false])
+			subscribe(location, null, locationHandlerWemo, [filterEvents:false])
 			state.subscribe = true
 		}
 
@@ -199,7 +213,6 @@ def installed() {
 }
 
 def updated() {
-	log.debug "Updated with settings: ${settings}"
     unsubscribe()
 	state.subscribe = false
 	if (selectedSwitches)
@@ -238,11 +251,9 @@ def subscribeToEvents() {
 	}
 }
 def eventHandler(evt) {
-	log.trace "eventHandler($evt?.name: $evt?.value)"
     takeAction(evt)
 }
 def modeChangeHandler(evt) {
-	log.trace "modeChangeHandler $evt.name: $evt.value ($triggerModes)"
 	if (evt.value in triggerModes) {
 		eventHandler(evt)
 	}
@@ -251,28 +262,20 @@ def modeChangeHandler(evt) {
 
 
 private scheduleActions() {
-    log.trace "scheduleActions"
-    
     def minutes = Math.max(settings.interval.toInteger(),1)
     def cron = "0 0/${minutes} * * * ?"
-    log.trace "$cron"
    	schedule(cron, scheduledActionsHandler)
 }
 def scheduledActionsHandler() {
-    log.trace "scheduledActionsHandler"
     state.actionTime = new Date().time
-    log.trace "actionTime ${ state.actionTime}"
-	//subscribeToDevices()
     refreshDevices()
-    //discoverAllWemoTypes()
+    discoverAllWemoTypes()
 }
 
 def resubscribe() {
-	log.debug "Resubscribe called, delegating to refresh()"
 	refresh()
 }
 def refreshDevices() {
-	log.debug "refreshDevices() called"
 	def devices = getAllChildDevices()
 	devices.each { d ->
 		log.debug "Calling refresh() on device: ${d.id}"
@@ -280,7 +283,6 @@ def refreshDevices() {
 	}
 }
 def subscribeToDevices() {
-	log.debug "subscribeToDevices() called"
 	def devices = getAllChildDevices()
 	devices.each { d ->
 		d.subscribe()
@@ -305,13 +307,13 @@ def addSwitches() {
 			def namespace = "mujica"
 			switch (selectedSwitch.value.ssdpTerm){
 				case ~/.*lightswitch.*/: 
-					name = "Wemo Switch"
+					name = "Wemo Light Switch"
 					break
 				case ~/.*sensor.*/: 
 					name = "Wemo Motion"
 					break
 				case ~/.*controllee.*/: 
-					name = "Wemo Light Switch"
+					name = "Wemo Switch"
 					break
 				case ~/.*insight.*/: 
 					name = "WeMo Insight Switch"
@@ -343,13 +345,12 @@ def initialize() {
 	}
 }
 
-def locationHandler(evt) {
+def locationHandlerWemo(evt) {
 	def description = evt.description
 	def hub = evt?.hubId
 	def parsedEvent = parseDiscoveryMessage(description)
 	parsedEvent << ["hub":hub]
     def msg = parseLanMessage(description)
-    log.debug "msg $msg"
 
 	if (parsedEvent?.ssdpTerm?.contains("Belkin:device:lightswitch") || parsedEvent?.ssdpTerm?.contains("Belkin:device:sensor") || parsedEvent?.ssdpTerm?.contains("Belkin:device:controllee") || parsedEvent?.ssdpTerm?.contains("Belkin:device:insight")) {
 
@@ -362,8 +363,6 @@ def locationHandler(evt) {
 		else
 		{ // just update the values
 
-			log.debug "Device was already found in state..."
-
 			def d = switches."${parsedEvent.ssdpUSN.toString()}"
 			boolean deviceChangedValues = false
 
@@ -371,12 +370,10 @@ def locationHandler(evt) {
 				d.ip = parsedEvent.ip
 				d.port = parsedEvent.port
 				deviceChangedValues = true
-				log.debug "Device's port or ip changed..."
 			}
 
 			if (deviceChangedValues) {
 				def children = getChildDevices()
-				log.debug "Found children ${children}"
 				children.each {
 					if (it.getDeviceDataByName("mac") == parsedEvent.mac) {
 						log.debug "updating ip and port, and resubscribing, for device ${it} with mac ${parsedEvent.mac}"
@@ -415,11 +412,8 @@ def appTouchHandler(evt) {
 
 private takeAction(evt) {
 	def eventTime = new Date().time
-	log.trace " eventTime ${eventTime} - actionTime ${state.actionTime?:0} dif ${eventTime - (state.actionTime?:0)}"
-	 log.trace "gap  ${eventTime - ( 60000 + Math.max((settings.interval ? settings.interval.toInteger():0),3) * 1000 * 60 + (state.actionTime?:0))  }"
 	if (eventTime > ( 60000 + Math.max((settings.interval ? settings.interval.toInteger():0),3) * 1000 * 60 + (state.actionTime?:0))) {
-		log.trace "force updated "
-		//scheduledActionsHandler()
+		scheduledActionsHandler()
 	}
 }
 private def parseXmlBody(def body) {
@@ -429,7 +423,6 @@ private def parseXmlBody(def body) {
 		bodyString = new String(decodedBytes)
 	} catch (Exception e) {
 		// Keep this log for debugging StringIndexOutOfBoundsException issue
-		log.error("Exception decoding bytes in sonos connect: ${decodedBytes}")
 		throw e
 	}
 	return new XmlSlurper().parseText(bodyString)
@@ -512,7 +505,6 @@ def pollChildren() {
 }
 
 def delayPoll() {
-	log.debug "Executing 'delayPoll'"
 	runIn(5, "pollChildren")
 }
 
@@ -530,27 +522,3 @@ private List getRealHubFirmwareVersions()
 {
 	return location.hubs*.firmwareVersionString.findAll { it }
 }
-
-private discover() {
-        InetSocketAddress socketAddress = new InetSocketAddress(InetAddress.getByName("239.255.255.250"), 1900)
-        MulticastSocket socket = new MulticastSocket(null)
-        try {
-            socket.bind(socketAddress)
-            StringBuilder packet = new StringBuilder()
-            packet.append( "M-SEARCH * HTTP/1.1\r\n" )
-            packet.append( "HOST: 239.255.255.250:1900\r\n" )
-            packet.append( "MAN: \"ssdp:discover\"\r\n" )
-            packet.append( "MX: ").append( "2" ).append( "\r\n" )
-            packet.append( "ST: " ).append( "ssdp:all" ).append( "\r\n" ).append( "\r\n" )
-//            packet.append( "ST: " ).append( "urn:Belkin:device:controllee:1" ).append( "\r\n" ).append( "\r\n" )
-            byte[] data = packet.toString().bytes
-            log.info("sending discovery packet")
-            socket.send(new DatagramPacket(data, data.length, socketAddress))
-        } catch (IOException e) {
-            inService = false
-            throw e
-        } finally {
-            socket.disconnect()
-            socket.close()
-        }
-    }
