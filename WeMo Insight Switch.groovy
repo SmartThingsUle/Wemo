@@ -22,6 +22,7 @@
         capability "Polling"
         capability "Refresh"
         capability "Sensor"
+	capability "Power Meter"
 
         attribute "currentIP", "string"
 
